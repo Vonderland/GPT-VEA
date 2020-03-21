@@ -1,0 +1,10 @@
+.idea/.gitignore
+.idea/GPT-VEA.iml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/inspectionProfiles/profiles_settings.xml
+data/train_tokenized.txt
+data/clean/clean_weibo.tsv
+data/raw/weibo.tsv
+data/raw/xiaohuangji.tsv
