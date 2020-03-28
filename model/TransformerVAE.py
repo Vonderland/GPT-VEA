@@ -1,14 +1,22 @@
 from torch import nn
 from typing import Tuple
 import torch
+import transformers
+
 
 from model.nn.modules import (EmbeddingWithPosition, TransformerEncoderLayer)
+from model.nn.gpt2 import GPT2LMHeadModel
+from transformers.modeling_gpt2 import GPT2Config
+
+
 
 class TransformerVAE(nn.Module):
     def __init__(self,
                  max_seq_len: int,
                  vocab_size: int,
                  embedding_weights=None,
+                 pretrained_decoder=None,
+                 decoder_config=None,
                  num_layers=10,
                  emb_size=768,
                  latent_size=150,
@@ -49,18 +57,18 @@ class TransformerVAE(nn.Module):
         ])
         # Decoder
         # 这里具体换掉
-        # self.decoder_layers = nn.ModuleList([
-        #     TransformerDecoderLayer(**encoder_decoder_args) for _ in range(num_layers)
-        # ])
-        # self.out = nn.Sequential(
-        #     nn.Linear(dim_m, vocab_size)
-        # )
+        if pretrained_decoder:  # 如果指定了预训练的GPT2模型
+            self.decoder = GPT2LMHeadModel.from_pretrained(pretrained_decoder)
+        else:  # 若没有指定预训练模型，则初始化模型
+            decoder_config = transformers.modeling_gpt2.GPT2Config.from_json_file(decoder_config)
+            self.decoder = GPT2LMHeadModel(config=decoder_config)
+        # 根据tokenizer的vocabulary调整GPT2模型的vocal的大小
+        self.decoder.resize_token_embeddings(vocab_size)
+        self.decoder.resize_latent_embeddings(latent_size)
 
         # VAE
         self.to_mu = nn.Linear(dim_m, latent_size)
         self.to_logvar = nn.Linear(dim_m, latent_size)
-        # 这一层是为了做维度兼容
-        self.decode_latent = nn.Linear(latent_size, dim_m)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
@@ -71,31 +79,20 @@ class TransformerVAE(nn.Module):
         batch_size = input.shape[0]
         input_embedded = self.embedding(input)
 
-
         encoder_state = input_embedded
 
         for encoder_layer in self.encoder_layers:
             encoder_state = encoder_layer(encoder_state)
 
-        # 这里用mlp或者last hidden state as sequence context vector
-        # if not self.pool_context:
-        #     # Use last hidden state as sequence context vector:
-        #     seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
-        # else:
-        #     seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
+        # Use last hidden state as sequence context vector:
+        seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+
 
         # Reparameterize
         mu = self.to_mu(seq_repr)
         logvar = self.to_logvar(seq_repr)
         z = self.reparameterize(mu, logvar)
 
-        encoder_state = self.decode_latent(z).view(batch_size, 1, -1)
+        outputs = self.decoder.forward(input_ids=input, latent_z=z)
 
-        # Decode 这里对应换掉
-        # mask = self.autoregressive_mask(input)
-        # decoder_state = input_embedded
-        # for decoder_layer in self.decoder_layers:
-        #     decoder_state = decoder_layer(decoder_state, encoder_state, mask)
-        #
-        # output = self.out(decoder_state)[:, :-1, :]
-        return output.contiguous(), mu, logvar
+        return outputs, mu, logvar
