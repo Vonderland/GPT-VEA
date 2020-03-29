@@ -12,15 +12,15 @@ from transformers.modeling_gpt2 import GPT2Config
 
 class TransformerVAE(nn.Module):
     def __init__(self,
-                 max_seq_len: int,
+                 n_ctx: int,
                  vocab_size: int,
                  embedding_weights=None,
                  pretrained_decoder=None,
                  decoder_config=None,
                  num_layers=10,
                  emb_size=768,
-                 latent_size=150,
-                 dim_m=512,
+                 latent_size=768,
+                 dim_m=768,
                  dim_i=2048,
                  n_heads=12,
                  initial_token_idx=101,
@@ -39,7 +39,7 @@ class TransformerVAE(nn.Module):
         assert dim_m % n_heads == 0, message
         dim_proj = dim_m // n_heads
 
-        encoder_decoder_args = {
+        encoder_args = {
             'dim_m': dim_m,
             'dim_q_k': dim_proj,
             'dim_v': dim_proj,
@@ -49,11 +49,10 @@ class TransformerVAE(nn.Module):
         }
 
         # Transformer
-        self.embedding = EmbeddingWithPosition(max_seq_len, dim_m, vocab_size, emb_size, embedding_weights)
-        # Encoder
-        self.repr_token = nn.Embedding(1, dim_m)
+        self.embedding = EmbeddingWithPosition(n_ctx, dim_m, vocab_size, emb_size, embedding_weights)
+
         self.encoder_layers = nn.ModuleList([
-            TransformerEncoderLayer(**encoder_decoder_args) for _ in range(num_layers)
+            TransformerEncoderLayer(**encoder_args) for _ in range(num_layers)
         ])
         # Decoder
         # 这里具体换掉
@@ -64,7 +63,7 @@ class TransformerVAE(nn.Module):
             self.decoder = GPT2LMHeadModel(config=decoder_config)
         # 根据tokenizer的vocabulary调整GPT2模型的vocal的大小
         self.decoder.resize_token_embeddings(vocab_size)
-        self.decoder.resize_latent_embeddings(latent_size)
+        print('model config:\n{}'.format(self.decoder.config.to_json_string()))
 
         # VAE
         self.to_mu = nn.Linear(dim_m, latent_size)
@@ -92,7 +91,10 @@ class TransformerVAE(nn.Module):
         mu = self.to_mu(seq_repr)
         logvar = self.to_logvar(seq_repr)
         z = self.reparameterize(mu, logvar)
+        z = z.view(batch_size, 1, -1)
 
+        # 这里的z是每个token都会加的！！！需要变换和拼接而且不应该用embedding而是应该用linear！！而且这个中文参考代码好像有问题，这里需要传mask进去的
+        # 中文的没传mask进去是因为他自己另外实现了calculate_loss_and_accuracy里用label跳过了mask
         outputs = self.decoder.forward(input_ids=input, latent_z=z)
 
         return outputs, mu, logvar

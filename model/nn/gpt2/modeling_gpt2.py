@@ -355,7 +355,6 @@ class GPT2Model(GPT2PreTrainedModel):
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
-        self.wle = nn.Embedding(config.n_latent, config.n_embd)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
@@ -365,10 +364,6 @@ class GPT2Model(GPT2PreTrainedModel):
     def _resize_token_embeddings(self, new_num_tokens):
         self.wte = self._get_resized_embeddings(self.wte, new_num_tokens)
         return self.wte
-
-    def _resize_latent_embeddings(self, new_num_latents):
-        self.wle = self._get_resized_embeddings(self.wle, new_num_latents)
-        return self.wle
 
     def _prune_heads(self, heads_to_prune):
         """ Prunes heads of the model.
@@ -385,8 +380,6 @@ class GPT2Model(GPT2PreTrainedModel):
             token_type_ids = token_type_ids.view(-1, input_shape[-1])
         if position_ids is not None:
             position_ids = position_ids.view(-1, input_shape[-1])
-        if latent_z is not None:
-            latent_z = latent_z.view(-1, input_shape[-1])
 
         if past is None:
             past_length = 0
@@ -439,9 +432,11 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             token_type_embeds = 0
         if latent_z is not None:
-            latent_z_embeds = self.wle(latent_z)
+            # todo: 这里换掉
+            latent_z_embeds = latent_z
         else:
             latent_z_embeds = 0
+        print(inputs_embeds.size(), latent_z_embeds.size())
         hidden_states = inputs_embeds + position_embeds + token_type_embeds + latent_z_embeds
         hidden_states = self.drop(hidden_states)
 
@@ -544,7 +539,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
                                    self.transformer.wte)
 
     def forward(self, input_ids, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
-                labels=None, latent_z = None):
+                labels=None, latent_z=None):
         transformer_outputs = self.transformer(input_ids,
                                                past=past,
                                                attention_mask=attention_mask,

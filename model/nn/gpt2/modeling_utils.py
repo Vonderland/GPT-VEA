@@ -133,18 +133,6 @@ class PreTrainedModel(nn.Module):
                 0
             )
 
-    def resize_latent_embeddings(self, new_num_latents=None):
-        base_model = getattr(self, self.base_model_prefix, self)  # get the base model if needed
-        model_embeds = base_model._resize_latent_embeddings(new_num_latents)
-        if new_num_latents is None:
-            return model_embeds
-
-        # Update base model and current model config
-        self.config.n_latent = new_num_latents
-        base_model.n_latent = new_num_latents
-
-        return model_embeds
-
     def resize_token_embeddings(self, new_num_tokens=None):
         """ Resize input token embeddings matrix of the model if new_num_tokens != config.vocab_size.
         Take care of tying weights embeddings afterwards if the model class has a `tie_weights()` method.

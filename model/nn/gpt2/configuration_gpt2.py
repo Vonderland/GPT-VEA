@@ -58,7 +58,6 @@ class GPT2Config(PretrainedConfig):
         vocab_size_or_config_json_file=50257,
         n_positions=1024,
         n_ctx=1024,
-        n_latent=150,
         n_embd=768,
         n_layer=12,
         n_head=12,
@@ -108,7 +107,6 @@ class GPT2Config(PretrainedConfig):
             self.n_ctx = n_ctx
             self.n_positions = n_positions
             self.n_embd = n_embd
-            self.n_latent = n_latent
             self.n_layer = n_layer
             self.n_head = n_head
             self.resid_pdrop = resid_pdrop

@@ -10,3 +10,7 @@ data/raw/weibo.tsv
 data/raw/xiaohuangji.tsv
 pretrained/config.json
 pretrained/pytorch_model.bin
+data/test.txt
+data/training.log
+data/clean/test.tsv
+tensorboard_summary/*

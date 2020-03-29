@@ -4,8 +4,8 @@ from tqdm import tqdm
 PAD = '[PAD]'
 n_ctx = 300
 vocab_path = "./vocabulary/vocab_small.txt"
-train_path = "./data/clean/clean_weibo.tsv"
-tokenized_path = "./data/train_tokenized.txt"
+train_path = "./data/clean/test.tsv"
+tokenized_path = "./data/test.txt"
 
 tokenizer = BertTokenizer(vocab_file=vocab_path)
 vocab_size = len(tokenizer)
