@@ -432,11 +432,9 @@ class GPT2Model(GPT2PreTrainedModel):
         else:
             token_type_embeds = 0
         if latent_z is not None:
-            # todo: 这里换掉
             latent_z_embeds = latent_z
         else:
             latent_z_embeds = 0
-        print(inputs_embeds.size(), latent_z_embeds.size())
         hidden_states = inputs_embeds + position_embeds + token_type_embeds + latent_z_embeds
         hidden_states = self.drop(hidden_states)
 

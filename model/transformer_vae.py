@@ -74,6 +74,9 @@ class TransformerVAE(nn.Module):
         eps = torch.randn_like(std)
         return eps.mul(std).add_(mu)
 
+    def save_decoder(self, decoder_path):
+        self.decoder.save_pretrained(decoder_path)
+
     def forward(self, input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = input.shape[0]
         input_embedded = self.embedding(input)
