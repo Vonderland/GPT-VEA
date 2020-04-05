@@ -30,15 +30,15 @@ def setup_train_args():
     parser.add_argument('--model_config', default='config/model_config_dialogue_small.json', type=str, required=False,
                         help='选择模型参数')
     parser.add_argument('--vocab_path', default='vocabulary/vocab_small.txt', type=str, required=False, help='选择词库')
-    parser.add_argument('--train_tokenized_path', default='data/train_tokenized.txt', type=str,
+    parser.add_argument('--train_tokenized_path', default='data/test.txt', type=str,
                         required=False,
                         help='将原始训练语料tokenize之后的数据的存放位置')
     parser.add_argument('--log_path', default='data/training.log', type=str, required=False, help='训练日志存放位置')
-    parser.add_argument('--epochs', default=10, type=int, required=False, help='训练的轮次')
+    parser.add_argument('--epochs', default=1, type=int, required=False, help='训练的轮次')
     parser.add_argument('--batch_size', default=8, type=int, required=False, help='训练batch size')
     parser.add_argument('--lr', default=1.5e-4, type=float, required=False, help='学习率')
     parser.add_argument('--warmup_steps', default=2000, type=int, required=False, help='warm up步数')
-    parser.add_argument('--log_step', default=10, type=int, required=False, help='多少步汇报一次loss')
+    parser.add_argument('--log_step', default=1, type=int, required=False, help='多少步汇报一次loss')
     parser.add_argument('--gradient_accumulation', default=1, type=int, required=False, help='梯度积累')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
     parser.add_argument('--model_output_path', default='saved_model/', type=str, required=False,
@@ -47,6 +47,10 @@ def setup_train_args():
     parser.add_argument('--writer_dir', default='tensorboard_summary/', type=str, required=False, help='Tensorboard路径')
     parser.add_argument('--seed', type=int, default=None, help='设置种子用于生成随机数，以使得训练的结果是确定的')
     parser.add_argument('--num_workers', type=int, default=1, help="dataloader加载数据时使用的线程数量")
+    parser.add_argument('--kl_anneal_function', type=str, default='logistic', help="kl散度模拟退火函数")
+    parser.add_argument('--kl_anneal_percentage', type=float, default=0.25, help="kl散度退火步数百分比")
+    parser.add_argument('--kl_anneal_k', type=float, default=0.000025, help="kl散度退火系数")
+    parser.add_argument('--save_step_percentage', type=int, default=0.05, help="多少步存一次")
     # parser.add_argument('--max_len', type=int, default=60, help='每个utterance的最大长度,超过指定长度则进行截断')
     # parser.add_argument('--max_history_len', type=int, default=4, help="dialogue history的最大长度")
     return parser.parse_args()
@@ -101,6 +105,11 @@ def create_model(args, vocab_size):
     model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, pretrained_decoder=args.pretrained_decoder)
     return model
 
+def kl_anneal_function(anneal_function, step, k, x0):
+    if anneal_function == 'logistic':
+        return float(1 / (1 + np.exp(-k * (step - x0))))
+    elif anneal_function == 'linear':
+        return min(1, step / x0)
 
 def calculate_loss_and_accuracy(outputs, labels, device):
     """
@@ -159,12 +168,16 @@ def collate_fn(batch):
 
 def train(model, device, train_list, multi_gpu, args):
     train_dataset = MyDataset(train_list)
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+    # 因为只train一个epoch，所以不shuffle
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                                   collate_fn=collate_fn)
 
     # 计算所有epoch进行参数优化的总步数total_steps
     total_steps = int(train_dataset.__len__() * args.epochs / args.batch_size / args.gradient_accumulation)
     logger.info('total training steps = {}'.format(total_steps))
+
+    save_step = int(args.save_step_percentage * total_steps)
+    logger.info('save per {} steps'.format(save_step))
 
     optimizer = transformers.AdamW(model.parameters(), lr=args.lr, correct_bias=True)
     scheduler = transformers.WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=total_steps)
@@ -173,8 +186,9 @@ def train(model, device, train_list, multi_gpu, args):
     # 用于统计每次梯度累计的loss
     running_loss = 0
     # 统计一共训练了多少个step
-    overall_step = 0
+    overall_step = -1
     finished_epoch = 0
+    kl_anneal_x0 = int(total_steps * args.kl_anneal_percentage)
 
     model_path = join(args.model_output_path, "saved.pt")
     if os.path.exists(model_path):
@@ -182,86 +196,95 @@ def train(model, device, train_list, multi_gpu, args):
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
-        finished_epoch = checkpoint['finished_epoch'] + 1
+        # finished_epoch = checkpoint['finished_epoch'] + 1
         running_loss = checkpoint['running_loss']
         overall_step = checkpoint['overall_step']
-    logger.info("finished epochs:{}, running loss:{}, overall step:{}".format(finished_epoch, running_loss, overall_step))
+    logger.info("running loss:{}, overall step:{}".format(running_loss, overall_step))
     # 记录tensorboardX
     tb_writer = SummaryWriter(log_dir=args.writer_dir)
     # 记录 out of memory的次数
     oom_time = 0
     # 开始训练
     model.train()
-    for epoch in range(finished_epoch, args.epochs):
-        epoch_start_time = datetime.now()
-        for batch_idx, input_ids in enumerate(train_dataloader):
-            # 注意：GPT2模型的forward()函数，是对于给定的context，生成一个token，而不是生成一串token
-            # GPT2Model的输入为n个token_id时，输出也是n个hidden_state，使用第n个hidden_state预测第n+1个token
-            input_ids = input_ids.to(device)
-            # 解决在运行过程中，由于显存不足产生的cuda out of memory的问题
-            try:
-                outputs, mu, logvar = model.forward(input=input_ids)
-                ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
-                kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
-                loss = ce + kld
-                if multi_gpu:
-                    loss = loss.mean()
-                    accuracy = accuracy.mean()
-                if args.gradient_accumulation > 1:
-                    loss = loss / args.gradient_accumulation
-                    accuracy = accuracy / args.gradient_accumulation
-                loss.backward()
-                # 梯度裁剪解决的是梯度消失或爆炸的问题，即设定阈值
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                # 进行一定step的梯度累计之后，更新参数
-                if (batch_idx + 1) % args.gradient_accumulation == 0:
-                    running_loss += loss.item()
-                    # 更新参数
-                    optimizer.step()
-                    # 清空梯度信息
-                    optimizer.zero_grad()
-                    # 进行warm up
-                    scheduler.step()
-                    overall_step += 1
-                    # 更新日志与tnesorboardX信息
-                    if (overall_step + 1) % args.log_step == 0:
-                        logger.info(
-                            "batch {} of epoch {}, ce {}, kld {}, loss {}, accuracy {}".format(batch_idx + 1, epoch + 1, ce, kld, loss, accuracy))
-                        tb_writer.add_scalar('ce', ce.item(), overall_step)
-                        tb_writer.add_scalar('kld', kld.item(), overall_step)
-                        tb_writer.add_scalar('loss', loss.item(), overall_step)
-            except RuntimeError as exception:
-                if "out of memory" in str(exception):
-                    oom_time += 1
-                    logger.info("WARNING: ran out of memory,times: {}".format(oom_time))
-                    if hasattr(torch.cuda, 'empty_cache'):
-                        torch.cuda.empty_cache()
-                else:
-                    logger.info(str(exception))
-                    raise exception
-        logger.info('saving model for epoch {}'.format(epoch + 1))
+    # for epoch in range(finished_epoch, args.epochs):
+    epoch_start_time = datetime.now()
+    for batch_idx, input_ids in enumerate(train_dataloader):
+        if batch_idx <= overall_step:
+            continue
+        # 注意：GPT2模型的forward()函数，是对于给定的context，生成一个token，而不是生成一串token
+        # GPT2Model的输入为n个token_id时，输出也是n个hidden_state，使用第n个hidden_state预测第n+1个token
+        input_ids = input_ids.to(device)
+        # 解决在运行过程中，由于显存不足产生的cuda out of memory的问题
+        try:
+            outputs, mu, logvar = model.forward(input=input_ids)
+            # anneal_function, step, k, x0
+            ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
 
-        if not os.path.exists(args.model_output_path):
-            os.mkdir(args.model_output_path)
+            kl_weight = kl_anneal_function(anneal_function=args.kl_anneal_function, step=overall_step,
+                                                       k=args.kl_anneal_k, x0=kl_anneal_x0)
+            kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
+            loss = ce + kl_weight * kld
+            if multi_gpu:
+                loss = loss.mean()
+                accuracy = accuracy.mean()
+            if args.gradient_accumulation > 1:
+                loss = loss / args.gradient_accumulation
+                accuracy = accuracy / args.gradient_accumulation
+            loss.backward()
+            # 梯度裁剪解决的是梯度消失或爆炸的问题，即设定阈值
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            # 进行一定step的梯度累计之后，更新参数
+            if (batch_idx + 1) % args.gradient_accumulation == 0:
+                running_loss += loss.item()
+                # 更新参数
+                optimizer.step()
+                # 清空梯度信息
+                optimizer.zero_grad()
+                # 进行warm up
+                scheduler.step()
+                overall_step += 1
+                # 更新日志与tnesorboardX信息
+                if (overall_step + 1) % args.log_step == 0:
+                    logger.info(
+                        "batch {} of step {}, ce {}, kld {}, kl_weight {}, loss {}, accuracy {}".format(batch_idx + 1,
+                                                                                                        overall_step, ce, kld, kl_weight, loss, accuracy))
+                    tb_writer.add_scalar('ce', ce.item(), overall_step)
+                    tb_writer.add_scalar('kld', kld.item(), overall_step)
+                    tb_writer.add_scalar('loss', loss.item(), overall_step)
+            if (overall_step + 1) % save_step == 0:
+                logger.info('saving for step {}'.format(overall_step))
+                if not os.path.exists(args.model_output_path):
+                    os.mkdir(args.model_output_path)
 
-        torch.save({
-            'finished_epoch': epoch,
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'scheduler': scheduler.state_dict(),
-            'overall_step': overall_step,
-            'running_loss': running_loss
-        }, model_path)
+                torch.save({
+                    # 'finished_epoch': epoch,
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                    'overall_step': overall_step,
+                    'running_loss': running_loss
+                }, model_path)
 
-        decoder_path = join(args.model_output_path, 'decoder/')
+                decoder_path = join(args.model_output_path, 'decoder/')
 
-        if not os.path.exists(decoder_path):
-            os.mkdir(decoder_path)
+                if not os.path.exists(decoder_path):
+                    os.mkdir(decoder_path)
 
-        model.save_decoder(decoder_path)
-        logger.info('epoch {} finished'.format(epoch + 1))
-        epoch_finish_time = datetime.now()
-        logger.info('time for one epoch: {}'.format(epoch_finish_time - epoch_start_time))
+                model.save_decoder(decoder_path)
+                logger.info('finish saving for step {}'.format(overall_step))
+
+        except RuntimeError as exception:
+            if "out of memory" in str(exception):
+                oom_time += 1
+                logger.info("WARNING: ran out of memory,times: {}".format(oom_time))
+                if hasattr(torch.cuda, 'empty_cache'):
+                    torch.cuda.empty_cache()
+            else:
+                logger.info(str(exception))
+                raise exception
+
+    epoch_finish_time = datetime.now()
+    logger.info('time for one epoch: {}'.format(epoch_finish_time - epoch_start_time))
     logger.info('training finished')
 
 
