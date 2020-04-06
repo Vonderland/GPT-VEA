@@ -9,6 +9,19 @@ remove = list('ノ¯︶ーσ･з∠~〜*&%$＊̀ ́；●ヾД≤≥ε┏゜ロ
 
 transmit = ["（转）", "（图转）", "「转」", "alink", "（转自网络）", "「图转」", "(转)", "(图片来自网络)"]
 
+def filter_at(desstr, restr=''):
+    try:
+        res = re.compile(u'@([^\s|\/|:|@]+)')
+    except re.error:
+        print("error at filter_at")
+    return res.sub(restr, desstr)
+
+def filter_topic(desstr, restr=''):
+    try:
+        res = re.compile(u'#[^#]+#')
+    except re.error:
+        print("error at filter_at")
+    return res.sub(restr, desstr)
 
 def filter_emoji(desstr,restr=''):
     try:
@@ -35,9 +48,12 @@ with open(out_path, "w") as target:
     with open(in_path, 'r') as f:
         for line in tqdm(f):
             try:
-                result = filter_transmit(line)
+                result = filter_at(line)
+                result = filter_topic(result)
+                result = filter_transmit(result)
                 result = filter_emoji(result)
                 result = handle_symbol(result)
+
                 target.write(result)
             except:
                 print("exception")
