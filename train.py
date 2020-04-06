@@ -30,12 +30,12 @@ def setup_train_args():
     parser.add_argument('--model_config', default='config/model_config_dialogue_small.json', type=str, required=False,
                         help='选择模型参数')
     parser.add_argument('--vocab_path', default='vocabulary/vocab_small.txt', type=str, required=False, help='选择词库')
-    parser.add_argument('--train_tokenized_path', default='data/test.txt', type=str,
+    parser.add_argument('--train_tokenized_path', default='data/train_tokenized.txt', type=str,
                         required=False,
                         help='将原始训练语料tokenize之后的数据的存放位置')
     parser.add_argument('--log_path', default='data/training.log', type=str, required=False, help='训练日志存放位置')
     parser.add_argument('--epochs', default=1, type=int, required=False, help='训练的轮次')
-    parser.add_argument('--batch_size', default=8, type=int, required=False, help='训练batch size')
+    parser.add_argument('--batch_size', default=16, type=int, required=False, help='训练batch size')
     parser.add_argument('--lr', default=1.5e-4, type=float, required=False, help='学习率')
     parser.add_argument('--warmup_steps', default=2000, type=int, required=False, help='warm up步数')
     parser.add_argument('--log_step', default=1, type=int, required=False, help='多少步汇报一次loss')
@@ -48,9 +48,10 @@ def setup_train_args():
     parser.add_argument('--seed', type=int, default=None, help='设置种子用于生成随机数，以使得训练的结果是确定的')
     parser.add_argument('--num_workers', type=int, default=1, help="dataloader加载数据时使用的线程数量")
     parser.add_argument('--kl_anneal_function', type=str, default='logistic', help="kl散度模拟退火函数")
-    parser.add_argument('--kl_anneal_percentage', type=float, default=0.25, help="kl散度退火步数百分比")
+    parser.add_argument('--kl_anneal_percentage', type=float, default=0.35, help="kl散度退火步数百分比")
     parser.add_argument('--kl_anneal_k', type=float, default=0.000025, help="kl散度退火系数")
-    parser.add_argument('--save_step_percentage', type=int, default=0.05, help="多少步存一次")
+    parser.add_argument('--save_step_percentage', type=float, default=0.05, help="多少步存一次")
+    parser.add_argument('--word_dropout', type=float, default=0.5, help="decoder输入mask的概率")
     # parser.add_argument('--max_len', type=int, default=60, help='每个utterance的最大长度,超过指定长度则进行截断')
     # parser.add_argument('--max_history_len', type=int, default=4, help="dialogue history的最大长度")
     return parser.parse_args()
@@ -102,7 +103,7 @@ def create_model(args, vocab_size):
     :param vocab_size:字典大小
     :return:
     """
-    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, pretrained_decoder=args.pretrained_decoder)
+    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, pretrained_decoder=args.pretrained_decoder, word_dropout=args.word_dropout)
     return model
 
 def kl_anneal_function(anneal_function, step, k, x0):
@@ -136,7 +137,7 @@ def calculate_loss_and_accuracy(outputs, labels, device):
     not_ignore = shift_labels.ne(pad_id)  # 进行非运算，返回一个tensor，若targets_view的第i个位置为pad_id，则置为0，否则为1
     num_targets = not_ignore.long().sum().item()  # 计算target中的非pad_id的数量
 
-    correct = (shift_labels == preds) & not_ignore  # 计算model预测正确的token的个数，排除pad的tokne
+    correct = (shift_labels == preds) & not_ignore  # 计算model预测正确的token的个数，排除pad的token
     correct = correct.float().sum()
 
     accuracy = correct / num_targets

@@ -8,7 +8,10 @@ from model.nn.modules import (EmbeddingWithPosition, TransformerEncoderLayer)
 from model.nn.gpt2 import GPT2LMHeadModel
 from transformers.modeling_gpt2 import GPT2Config
 
-
+pad_idx = 0
+unk_idx = 100
+cls_idx = 101
+sep_idx = 102
 
 class TransformerVAE(nn.Module):
     def __init__(self,
@@ -24,7 +27,8 @@ class TransformerVAE(nn.Module):
                  dim_i=2048,
                  n_heads=12,
                  initial_token_idx=101,
-                 dropout=0.1):
+                 dropout=0.1,
+                 word_dropout=0):
 
         super(TransformerVAE, self).__init__()
 
@@ -34,6 +38,7 @@ class TransformerVAE(nn.Module):
             assert isinstance(embedding_weights, torch.Tensor), "embedding must be a torch.Tensor"
             vocab_size, emb_size = embedding_weights.shape
         self.vocab_size = vocab_size
+        self.word_dropout_rate = word_dropout
 
         message = 'Model `dim_m` must be divisible by `n_heads` without a remainder.'
         assert dim_m % n_heads == 0, message
@@ -98,6 +103,15 @@ class TransformerVAE(nn.Module):
 
         # 这里的z是每个token都会加的！！！需要变换和拼接而且不应该用embedding而是应该用linear！！而且这个中文参考代码好像有问题，这里需要传mask进去的
         # 中文的没传mask进去是因为他自己另外实现了calculate_loss_and_accuracy里用label跳过了mask
-        outputs = self.decoder.forward(input_ids=input, latent_z=z)
+        # decoder input
+        if self.word_dropout_rate > 0:
+            # randomly replace decoder input with <unk>
+            prob = torch.rand(input.size())
+            if torch.cuda.is_available():
+                prob = prob.cuda()
+            prob[(input.data - cls_idx) * (input.data - pad_idx) * (input.data - sep_idx) == 0] = 1
+            decoder_input_sequence = input.clone()
+            decoder_input_sequence[prob < self.word_dropout_rate] = unk_idx
+        outputs = self.decoder.forward(input_ids=decoder_input_sequence, latent_z=z)
 
         return outputs, mu, logvar
