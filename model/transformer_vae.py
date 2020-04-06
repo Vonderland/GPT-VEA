@@ -6,12 +6,47 @@ import transformers
 
 from model.nn.modules import (EmbeddingWithPosition, TransformerEncoderLayer)
 from model.nn.gpt2 import GPT2LMHeadModel
+
+import torch.nn.functional as F
+
 from transformers.modeling_gpt2 import GPT2Config
 
 pad_idx = 0
 unk_idx = 100
 cls_idx = 101
 sep_idx = 102
+
+def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
+    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+        Args:
+            logits: logits distribution shape (vocabulary size)
+            top_k > 0: keep only top k tokens with highest probability (top-k filtering).
+            top_p > 0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+        From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+    """
+    assert logits.dim() == 1  # batch size 1 for now - could be updated for more but the code would be less clear
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    if top_k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        # torch.topk()返回最后一维最大的top_k个元素，返回值为二维(values,indices)
+        # ...表示其他维度由计算机自行推断
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = filter_value  # 对于topk之外的其他元素的logits值设为负无穷
+
+    if top_p > 0.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)  # 对logits进行递减排序
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+        logits[indices_to_remove] = filter_value
+    return logits
 
 class TransformerVAE(nn.Module):
     def __init__(self,
@@ -81,6 +116,46 @@ class TransformerVAE(nn.Module):
 
     def save_decoder(self, decoder_path):
         self.decoder.save_pretrained(decoder_path)
+
+    def inference(self, input: torch.Tensor, device, max_len, topk, topp):
+        batch_size = input.shape[0]
+        input_embedded = self.embedding(input)
+
+        encoder_state = input_embedded
+
+        for encoder_layer in self.encoder_layers:
+            encoder_state = encoder_layer(encoder_state)
+
+        # Use last hidden state as sequence context vector:
+        seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+
+        # Reparameterize
+        mu = self.to_mu(seq_repr)
+        logvar = self.to_logvar(seq_repr)
+        z = self.reparameterize(mu, logvar)
+        z = z.view(batch_size, 1, -1)
+
+        generated = []
+        input_ids = [cls_idx]
+        curr_input_tensor = torch.tensor(input_ids).long().to(device)
+
+        # 最多生成max_len个token
+        for _ in range(max_len):
+            outputs = self.decoder(input_ids=curr_input_tensor, latent_z=z)
+            next_token_logits = outputs[0][-1, :]
+            # 对于[UNK]的概率设为无穷小，也就是说模型的预测结果不可能是[UNK]这个token
+            next_token_logits[unk_idx] = -float('Inf')
+            filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=topk, top_p=topp)
+            # torch.multinomial表示从候选集合中无放回地进行抽取num_samples个元素，权重越高，抽到的几率越高，返回元素的下标
+            next_token = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+            # if next_token == tokenizer.sep_token_id:  # 遇到[SEP]则表明response生成结束
+            #     break
+            generated.append(next_token.item())
+            curr_input_tensor = torch.cat((curr_input_tensor, next_token), dim=0)
+            # his_text = tokenizer.convert_ids_to_tokens(curr_input_tensor.tolist())
+            # print("his_text:{}".format(his_text))
+
+        return generated
 
     def forward(self, input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = input.shape[0]
