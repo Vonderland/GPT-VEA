@@ -6,15 +6,18 @@ import transformers
 
 from model.nn.modules import (EmbeddingWithPosition, TransformerEncoderLayer)
 from model.nn.gpt2 import GPT2LMHeadModel
+from transformers.modeling_gpt2 import GPT2Config
+from model.nn.gpt2 import configuration_utils
+
 
 import torch.nn.functional as F
 
-from transformers.modeling_gpt2 import GPT2Config
 
 pad_idx = 0
 unk_idx = 100
 cls_idx = 101
 sep_idx = 102
+
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
@@ -48,6 +51,7 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
         logits[indices_to_remove] = filter_value
     return logits
 
+
 class TransformerVAE(nn.Module):
     def __init__(self,
                  n_ctx: int,
@@ -55,6 +59,8 @@ class TransformerVAE(nn.Module):
                  embedding_weights=None,
                  pretrained_decoder=None,
                  decoder_config=None,
+                 use_avg=True,
+                 with_bow=True,
                  num_layers=10,
                  emb_size=768,
                  latent_size=768,
@@ -74,6 +80,8 @@ class TransformerVAE(nn.Module):
             vocab_size, emb_size = embedding_weights.shape
         self.vocab_size = vocab_size
         self.word_dropout_rate = word_dropout
+        self.use_avg = use_avg
+        self.with_bow = with_bow
 
         message = 'Model `dim_m` must be divisible by `n_heads` without a remainder.'
         assert dim_m % n_heads == 0, message
@@ -99,8 +107,9 @@ class TransformerVAE(nn.Module):
         if pretrained_decoder:  # 如果指定了预训练的GPT2模型
             self.decoder = GPT2LMHeadModel.from_pretrained(pretrained_decoder)
         else:  # 若没有指定预训练模型，则初始化模型
-            decoder_config = transformers.modeling_gpt2.GPT2Config.from_json_file(decoder_config)
-            self.decoder = GPT2LMHeadModel(config=decoder_config)
+            print("use config, random initialization")
+            model_config = configuration_utils.PretrainedConfig.from_json_file(decoder_config)
+            self.decoder = GPT2LMHeadModel(config=model_config)
         # 根据tokenizer的vocabulary调整GPT2模型的vocal的大小
         self.decoder.resize_token_embeddings(vocab_size)
         print('model config:\n{}'.format(self.decoder.config.to_json_string()))
@@ -108,6 +117,10 @@ class TransformerVAE(nn.Module):
         # VAE
         self.to_mu = nn.Linear(dim_m, latent_size)
         self.to_logvar = nn.Linear(dim_m, latent_size)
+
+        if self.with_bow:
+            self.bow_predictor = nn.Linear(latent_size, vocab_size)
+
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
@@ -127,7 +140,11 @@ class TransformerVAE(nn.Module):
             encoder_state = encoder_layer(encoder_state)
 
         # Use last hidden state as sequence context vector:
-        seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+        # 用最后一个状态可能太弱了，试下换成均值
+        if self.use_avg:
+            seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+        else:
+            seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
 
         # Reparameterize
         mu = self.to_mu(seq_repr)
@@ -157,7 +174,7 @@ class TransformerVAE(nn.Module):
 
         return generated
 
-    def forward(self, input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, input: torch.Tensor):
         batch_size = input.shape[0]
         input_embedded = self.embedding(input)
 
@@ -167,18 +184,28 @@ class TransformerVAE(nn.Module):
             encoder_state = encoder_layer(encoder_state)
 
         # Use last hidden state as sequence context vector:
-        seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+        # 用最后一个状态可能太弱了，试下换成均值
+        if self.use_avg:
+            seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+        else:
+            seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
 
 
         # Reparameterize
         mu = self.to_mu(seq_repr)
         logvar = self.to_logvar(seq_repr)
         z = self.reparameterize(mu, logvar)
+
+        bow_probs = None
+        # bow
+        if self.with_bow:
+            bow_logits = self.bow_predictor(z)
+            bow_probs = F.softmax(bow_logits, dim=-1)
+
         z = z.view(batch_size, 1, -1)
 
         # 这里的z是每个token都会加的！！！需要变换和拼接而且不应该用embedding而是应该用linear！！而且这个中文参考代码好像有问题，这里需要传mask进去的
         # 中文的没传mask进去是因为他自己另外实现了calculate_loss_and_accuracy里用label跳过了mask
-        # decoder input
         if self.word_dropout_rate > 0:
             # randomly replace decoder input with <unk>
             prob = torch.rand(input.size())
@@ -187,6 +214,9 @@ class TransformerVAE(nn.Module):
             prob[(input.data - cls_idx) * (input.data - pad_idx) * (input.data - sep_idx) == 0] = 1
             decoder_input_sequence = input.clone()
             decoder_input_sequence[prob < self.word_dropout_rate] = unk_idx
-        outputs = self.decoder.forward(input_ids=decoder_input_sequence, latent_z=z)
+            outputs = self.decoder.forward(input_ids=decoder_input_sequence, latent_z=z)
+        else:
+            outputs = self.decoder.forward(input_ids=input, latent_z=z)
 
-        return outputs, mu, logvar
+
+        return outputs, mu, logvar, bow_probs

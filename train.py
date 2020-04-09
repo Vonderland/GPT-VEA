@@ -51,7 +51,7 @@ def setup_train_args():
     parser.add_argument('--kl_anneal_percentage', type=float, default=0.1, help="kl散度退火步数百分比")
     parser.add_argument('--kl_anneal_k', type=float, default=0.00025, help="kl散度退火系数")
     parser.add_argument('--save_step_percentage', type=float, default=0.05, help="多少步存一次")
-    parser.add_argument('--word_dropout', type=float, default=0.5, help="decoder输入mask的概率")
+    parser.add_argument('--word_dropout', type=float, default=0, help="decoder输入mask的概率")
     # parser.add_argument('--max_len', type=int, default=60, help='每个utterance的最大长度,超过指定长度则进行截断')
     # parser.add_argument('--max_history_len', type=int, default=4, help="dialogue history的最大长度")
     return parser.parse_args()
@@ -145,6 +145,25 @@ def calculate_loss_and_accuracy(outputs, labels, device):
     return loss, accuracy
 
 
+def calculate_bow(bow_probs, input_ids, device):
+    bow = 0
+    if bow_probs is not None:
+        # skip the [cls]
+        label = input_ids[:, 1:].contiguous().to(device)
+        bow_probs = bow_probs.unsqueeze(1)
+        bow_probs = bow_probs.expand(bow_probs.shape[0], label.shape[1], bow_probs.shape[2]).contiguous()
+
+        loss_fct = CrossEntropyLoss(ignore_index=pad_id, reduction='sum')  # 忽略pad_id的loss,并对所有的非pad_id的loss进行求和
+        bow = loss_fct(bow_probs.view(-1, bow_probs.size(-1)),
+                       label.view(-1))
+
+        # 对非pad_id的token的loss进行求平均，且计算出预测的准确率
+        not_ignore = label.ne(pad_id)  # 进行非运算，返回一个tensor，若targets_view的第i个位置为pad_id，则置为0，否则为1
+        num_targets = not_ignore.long().sum().item()  # 计算target中的非pad_id的数量
+        bow = bow / num_targets
+    return bow
+
+
 def collate_fn(batch):
     """
     计算该batch中的所有sample的最长的input，并且将其他input的长度向其对齐
@@ -177,7 +196,7 @@ def train(model, device, train_list, multi_gpu, args):
     total_steps = int(train_dataset.__len__() * args.epochs / args.batch_size / args.gradient_accumulation)
     logger.info('total training steps = {}'.format(total_steps))
 
-    save_step = int(args.save_step_percentage * total_steps)
+    save_step = max(int(args.save_step_percentage * total_steps), 1)
     logger.info('save per {} steps'.format(save_step))
 
     optimizer = transformers.AdamW(model.parameters(), lr=args.lr, correct_bias=True)
@@ -217,14 +236,18 @@ def train(model, device, train_list, multi_gpu, args):
         input_ids = input_ids.to(device)
         # 解决在运行过程中，由于显存不足产生的cuda out of memory的问题
         try:
-            outputs, mu, logvar = model.forward(input=input_ids)
+            outputs, mu, logvar, bow_probs = model.forward(input=input_ids)
             # anneal_function, step, k, x0
             ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
 
             kl_weight = kl_anneal_function(anneal_function=args.kl_anneal_function, step=overall_step,
                                                        k=args.kl_anneal_k, x0=kl_anneal_x0)
             kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
-            loss = ce + kl_weight * kld
+
+            bow_loss = calculate_bow(bow_probs, input_ids, device)
+
+            loss = ce + kl_weight * kld + bow_loss
+
             if multi_gpu:
                 loss = loss.mean()
                 accuracy = accuracy.mean()
@@ -247,8 +270,8 @@ def train(model, device, train_list, multi_gpu, args):
                 # 更新日志与tnesorboardX信息
                 if (overall_step + 1) % args.log_step == 0:
                     logger.info(
-                        "batch {} of step {}, ce {}, kld {}, kl_weight {}, loss {}, accuracy {}".format(batch_idx + 1,
-                                                                                                        overall_step, ce, kld, kl_weight, loss, accuracy))
+                        "batch {} of step {}, ce {}, kld {}, kl_weight {}, bow {}, loss {}, accuracy {}".format(batch_idx + 1,
+                                                                                                        overall_step, ce, kld, kl_weight, bow_loss, loss, accuracy))
                     tb_writer.add_scalar('ce', ce.item(), overall_step)
                     tb_writer.add_scalar('kld', kld.item(), overall_step)
                     tb_writer.add_scalar('loss', loss.item(), overall_step)
@@ -299,10 +322,12 @@ def evaluate(model, device, test_list, multi_gpu, args):
     with torch.no_grad():
         for batch_idx, input_ids in enumerate(test_dataloader):
             input_ids.to(device)
-            outputs, mu, logvar = model.forward(input=input_ids)
+            outputs, mu, logvar, bow_probs = model.forward(input=input_ids)
             ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
             kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
-            loss = ce + kld
+            bow_loss = calculate_bow(bow_probs, input_ids,device)
+
+            loss = ce + kld + bow_loss
 
             if multi_gpu:
                 loss = loss.mean()
@@ -310,7 +335,7 @@ def evaluate(model, device, test_list, multi_gpu, args):
             if args.gradient_accumulation > 1:
                 loss = loss / args.gradient_accumulation
                 accuracy = accuracy / args.gradient_accumulation
-            logger.info("evaluate batch {}, ce {}, kld {}, loss {}, accuracy {}".format(batch_idx, ce, kld, loss, accuracy))
+            logger.info("evaluate batch {}, ce {}, kld {}, bow {}, loss {}, accuracy {}".format(batch_idx, ce, kld, bow_loss, loss, accuracy))
         logger.info("finishing evaluating")
 
 
