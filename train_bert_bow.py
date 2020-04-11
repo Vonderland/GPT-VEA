@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from torch.nn import DataParallel
 import logging
-from model import TransformerBOW
+from model import BertBOW
 from transformers import BertTokenizer
 from os.path import join, exists
 from dataset import MyDataset
@@ -36,7 +36,7 @@ def setup_train_args():
     parser.add_argument('--batch_size', default=16, type=int, required=False, help='训练batch size')
     parser.add_argument('--lr', default=1.5e-4, type=float, required=False, help='学习率')
     parser.add_argument('--warmup_steps', default=2000, type=int, required=False, help='warm up步数')
-    parser.add_argument('--log_step', default=1, type=int, required=False, help='多少步汇报一次loss')
+    parser.add_argument('--log_step', default=50, type=int, required=False, help='多少步汇报一次loss')
     parser.add_argument('--gradient_accumulation', default=1, type=int, required=False, help='梯度积累')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
     parser.add_argument('--model_output_path', default='tbow_saved_model/', type=str, required=False,
@@ -45,6 +45,7 @@ def setup_train_args():
     parser.add_argument('--seed', type=int, default=None, help='设置种子用于生成随机数，以使得训练的结果是确定的')
     parser.add_argument('--num_workers', type=int, default=1, help="dataloader加载数据时使用的线程数量")
     parser.add_argument('--save_step_percentage', type=float, default=0.05, help="多少步存一次")
+    parser.add_argument('--repr_form', type=str, default="last", help="z的表示方式")
     # parser.add_argument('--max_len', type=int, default=60, help='每个utterance的最大长度,超过指定长度则进行截断')
     # parser.add_argument('--max_history_len', type=int, default=4, help="dialogue history的最大长度")
     return parser.parse_args()
@@ -89,14 +90,14 @@ def create_logger(args):
     return logger
 
 
-def create_model(vocab_size):
+def create_model(vocab_size, args):
     """
 
     :param args:
     :param vocab_size:字典大小
     :return:
     """
-    model = TransformerBOW(n_ctx=n_ctx, vocab_size=vocab_size)
+    model = BertBOW(vocab_size=vocab_size, repr_form=args.repr_form)
     return model
 
 
@@ -306,7 +307,7 @@ def main():
     pad_id = 0
 
     # 加载GPT2模型
-    model = create_model(vocab_size)
+    model = create_model(vocab_size, args)
     model.to(device)
 
     # 是否使用多块GPU进行并行运算
