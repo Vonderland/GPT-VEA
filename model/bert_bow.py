@@ -19,6 +19,8 @@ class BertBOW(nn.Module):
         # Transformer
         model_config = configuration_utils.PretrainedConfig.from_json_file("config/bert_config.json")
         self.encoder = BertModel(config=model_config)
+
+        # self.encoder = BertModel.from_pretrained('hfl/rbtl3')
         self.repr_form = repr_form
 
         # VAE
@@ -50,7 +52,7 @@ class BertBOW(nn.Module):
         # 按照原来的用均值？用最后一个？
         # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
         if self.repr_form == "last":
-            seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+            seq_repr = encoder_state[x:, -1, :].view(batch_size, -1)
         elif self.repr_form == "mean":
             seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
         elif self.repr_form == "first":
@@ -65,6 +67,7 @@ class BertBOW(nn.Module):
         mu = self.to_mu(seq_repr)
         logvar = self.to_logvar(seq_repr)
         z = self.reparameterize(mu, logvar)
+        print(z.shape)
 
         # bow
         bow_logits = self.bow_predictor(z)

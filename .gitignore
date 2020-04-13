@@ -16,3 +16,9 @@ data/clean/test.tsv
 tensorboard_summary/*
 saved_model
 test_saved_model
+bg_tensorboard_summary/events.out.tfevents.1586702569.Vonderlands-MacBook-Pro.local.74826.0
+bg_tensorboard_summary/events.out.tfevents.1586764528.Vonderlands-MacBook-Pro.local.99621.0
+bg_tensorboard_summary/events.out.tfevents.1586765321.Vonderlands-MacBook-Pro.local.99795.0
+config/bert/bert_config.json
+config/bert/pytorch_model.bin
+config/bert/vocab.txt
