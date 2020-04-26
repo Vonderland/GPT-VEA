@@ -110,10 +110,6 @@ def create_model(args, vocab_size):
 
 
 def kl_anneal_function(anneal_function, step, k, x0):
-    # tmp =  float(1 / (1 + np.exp(-k * (step - x0))))
-    # if tmp > 0.007:
-    #     tmp = 4.5 * 1e-6 * step - 0.1852
-    # return min(tmp, 1)
     if anneal_function == 'logistic':
         return float(1 / (1 + np.exp(-k * (step - x0))))
     elif anneal_function == 'linear':

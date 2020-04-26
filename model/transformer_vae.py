@@ -204,8 +204,7 @@ class TransformerVAE(nn.Module):
 
         z = z.view(batch_size, 1, -1)
 
-        # 这里的z是每个token都会加的！！！需要变换和拼接而且不应该用embedding而是应该用linear！！而且这个中文参考代码好像有问题，这里需要传mask进去的
-        # 中文的没传mask进去是因为他自己另外实现了calculate_loss_and_accuracy里用label跳过了mask
+
         if self.word_dropout_rate > 0:
             # randomly replace decoder input with <unk>
             prob = torch.rand(input.size())
