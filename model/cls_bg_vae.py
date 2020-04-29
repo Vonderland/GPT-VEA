@@ -3,8 +3,8 @@ from typing import Tuple
 import torch
 import transformers
 from model.nn.cls_gpt2 import GPT2LMHeadModel
-from transformers import BertModel, configuration_utils
 from model.nn.cls_gpt2 import configuration_utils
+from transformers import BertModel, configuration_utils
 
 
 import torch.nn.functional as F

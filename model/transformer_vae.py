@@ -3,11 +3,9 @@ from typing import Tuple
 import torch
 import transformers
 
-
 from model.nn.modules import (EmbeddingWithPosition, TransformerEncoderLayer)
-from model.nn.gpt2 import GPT2LMHeadModel
-from transformers.modeling_gpt2 import GPT2Config
-from model.nn.gpt2 import configuration_utils
+
+
 
 
 import torch.nn.functional as F
@@ -59,8 +57,9 @@ class TransformerVAE(nn.Module):
                  embedding_weights=None,
                  pretrained_decoder=None,
                  decoder_config=None,
-                 use_avg=True,
                  with_bow=True,
+                 repr_form="mean",
+                 z_utilize="embedding",
                  num_layers=10,
                  emb_size=768,
                  latent_size=768,
@@ -80,7 +79,8 @@ class TransformerVAE(nn.Module):
             vocab_size, emb_size = embedding_weights.shape
         self.vocab_size = vocab_size
         self.word_dropout_rate = word_dropout
-        self.use_avg = use_avg
+        self.repr_form = repr_form
+        self.z_utilize = z_utilize
         self.with_bow = with_bow
 
         message = 'Model `dim_m` must be divisible by `n_heads` without a remainder.'
@@ -102,8 +102,16 @@ class TransformerVAE(nn.Module):
         self.encoder_layers = nn.ModuleList([
             TransformerEncoderLayer(**encoder_args) for _ in range(num_layers)
         ])
+
         # Decoder
         # 这里具体换掉
+        if self.z_utilize == "cls":
+            from model.nn.cls_gpt2 import GPT2LMHeadModel
+            from model.nn.cls_gpt2 import configuration_utils
+        else:
+            from model.nn.gpt2 import GPT2LMHeadModel
+            from model.nn.gpt2 import configuration_utils
+
         if pretrained_decoder:  # 如果指定了预训练的GPT2模型
             self.decoder = GPT2LMHeadModel.from_pretrained(pretrained_decoder)
         else:  # 若没有指定预训练模型，则初始化模型
@@ -115,8 +123,17 @@ class TransformerVAE(nn.Module):
         print('model config:\n{}'.format(self.decoder.config.to_json_string()))
 
         # VAE
-        self.to_mu = nn.Linear(dim_m, latent_size)
-        self.to_logvar = nn.Linear(dim_m, latent_size)
+        # first-last
+        if self.repr_form == "fl":
+            self.to_mu = nn.Linear(2 * dim_m, latent_size)
+            self.to_logvar = nn.Linear(2 * dim_m, latent_size)
+        # first-mean-last
+        elif self.repr_form == "fml":
+            self.to_mu = nn.Linear(3 * dim_m, latent_size)
+            self.to_logvar = nn.Linear(3 * dim_m, latent_size)
+        else:
+            self.to_mu = nn.Linear(dim_m, latent_size)
+            self.to_logvar = nn.Linear(dim_m, latent_size)
 
         if self.with_bow:
             self.bow_predictor = nn.Linear(latent_size, vocab_size)
@@ -141,16 +158,28 @@ class TransformerVAE(nn.Module):
 
         # Use last hidden state as sequence context vector:
         # 用最后一个状态可能太弱了，试下换成均值
-        if self.use_avg:
+        # 按照原来的用均值？用最后一个？
+        # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
+        if self.repr_form == "last":
             seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
-        else:
+        elif self.repr_form == "mean":
             seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
+        elif self.repr_form == "first":
+            seq_repr = encoder_state[:, 0, :].view(batch_size, -1)
+        elif self.repr_form == "fl":
+            seq_repr = torch.cat((encoder_state[:, 0, :], encoder_state[:, -1, :]), -1).view(batch_size, -1)
+        elif self.repr_form == "fml":
+            seq_repr = torch.cat((encoder_state[:, 0, :], encoder_state.mean(dim=1), encoder_state[:, -1, :]), -1).view(batch_size, -1)
 
         # Reparameterize
         mu = self.to_mu(seq_repr)
         logvar = self.to_logvar(seq_repr)
         z = self.reparameterize(mu, logvar)
-        z = z.view(batch_size, 1, -1)
+
+        if self.z_utilize == "cls":
+            z = z.view(batch_size, -1)
+        else:
+            z = z.view(batch_size, 1, -1)
 
         generated = []
         input_ids = [cls_idx]
@@ -185,10 +214,21 @@ class TransformerVAE(nn.Module):
 
         # Use last hidden state as sequence context vector:
         # 用最后一个状态可能太弱了，试下换成均值
-        if self.use_avg:
+        # Use last hidden state as sequence context vector:
+        # 用最后一个状态可能太弱了，试下换成均值
+        # 按照原来的用均值？用最后一个？
+        # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
+        if self.repr_form == "last":
             seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
-        else:
+        elif self.repr_form == "mean":
             seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
+        elif self.repr_form == "first":
+            seq_repr = encoder_state[:, 0, :].view(batch_size, -1)
+        elif self.repr_form == "fl":
+            seq_repr = torch.cat((encoder_state[:, 0, :], encoder_state[:, -1, :]), -1).view(batch_size, -1)
+        elif self.repr_form == "fml":
+            seq_repr = torch.cat((encoder_state[:, 0, :], encoder_state.mean(dim=1), encoder_state[:, -1, :]),
+                                 -1).view(batch_size, -1)
 
 
         # Reparameterize
@@ -202,7 +242,10 @@ class TransformerVAE(nn.Module):
             bow_logits = self.bow_predictor(z)
             bow_probs = F.softmax(bow_logits, dim=-1)
 
-        z = z.view(batch_size, 1, -1)
+        if self.z_utilize == "cls":
+            z = z.view(batch_size, -1)
+        else:
+            z = z.view(batch_size, 1, -1)
 
 
         if self.word_dropout_rate > 0:
@@ -216,6 +259,5 @@ class TransformerVAE(nn.Module):
             outputs = self.decoder.forward(input_ids=decoder_input_sequence, latent_z=z)
         else:
             outputs = self.decoder.forward(input_ids=input, latent_z=z)
-
 
         return outputs, mu, logvar, bow_probs

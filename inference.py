@@ -4,17 +4,13 @@ import os
 import random
 import numpy as np
 import argparse
-from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
-from torch.nn import DataParallel
 import logging
 from model import TransformerVAE
 from transformers import BertTokenizer
 from os.path import join, exists
-from dataset import MyDataset
-from torch.utils.data import Dataset, DataLoader
-from torch.nn import CrossEntropyLoss
+
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 logger = None
 n_ctx = 300
@@ -34,9 +30,12 @@ def set_interact_args():
     parser.add_argument('--output_path', default='data/output.txt', type=str, required=False, help='测试语料生成存放位置')
     parser.add_argument('--model_output_path', default='saved_model/', type=str, required=False,
                         help='对话模型输出路径')
-    parser.add_argument('--pretrained_decoder', default='saved_model/decoder', type=str, required=False, help='预训练的GPT2模型的路径')
+    parser.add_argument('--decoder_config', default='pretrained/config.json', type=str, required=False,
+                        help='选择模型参数')
     parser.add_argument('--topk', default=8, type=int, required=False, help='最高k选1')
     parser.add_argument('--topp', default=0, type=float, required=False, help='最高积累概率')
+    parser.add_argument('--repr_form', type=str, default="mean", help="z的表示方式")
+    parser.add_argument('--z_utilize', type=str, default="embedding", help="z的使用方式")
     parser.add_argument('--max_len', type=int, default=100, help='每个utterance的最大长度,超过指定长度则进行截断')
     return parser.parse_args()
 
@@ -105,7 +104,7 @@ def get_text(tokenizer, ids):
     while sep_idx in ids:
         ids.remove(sep_idx)
     text = tokenizer.convert_ids_to_tokens(ids)
-    return text
+    return "".join(text)
 
 def main():
     args = set_interact_args()
@@ -124,7 +123,7 @@ def main():
     with open(args.train_tokenized_path, "r", encoding="utf8") as f:
         data = f.read()
     data_list = data.split("\n")
-    train_list, test_list = train_test_split(data_list, test_size=0.001, random_state=1)
+    train_list, test_list = train_test_split(data_list, test_size=0.05, random_state=1)
 
     model = create_model(args, vocab_size)
     model.to(device)
@@ -138,14 +137,20 @@ def main():
 
     model.eval()
 
+    flag = False
     with open(args.output_path, "w", encoding="utf-8") as f:
-        for test in test_list:
+        for test in tqdm(test_list):
+            test = [int(i) for i in test.split()]
             input_tensor = torch.tensor(test).long().to(device)
+            input_tensor = torch.unsqueeze(input_tensor, 0)
+            if not flag:
+                print(input_tensor.shape)
+                flag = True
             gen = model.inference(input_tensor, device, args.max_len, args.topk, args.topp)
             src = get_text(tokenizer, test)
             gen = get_text(tokenizer, gen)
-            f.write("src:{}\tgen:{}".format(src, gen))
-            f.write("\n")
+            f.write("src:{}\n".format(src))
+            f.write("gen:{}\n".format(gen))
 
 if __name__ == '__main__':
     main()

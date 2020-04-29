@@ -39,7 +39,6 @@ def setup_train_args():
     parser.add_argument('--lr', default=1.5e-4, type=float, required=False, help='学习率')
     parser.add_argument('--warmup_steps', default=2000, type=int, required=False, help='warm up步数')
     parser.add_argument('--log_step', default=1, type=int, required=False, help='多少步汇报一次loss')
-    parser.add_argument('--gradient_accumulation', default=1, type=int, required=False, help='梯度积累')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
     parser.add_argument('--model_output_path', default='saved_model/', type=str, required=False,
                         help='对话模型输出路径')
@@ -48,14 +47,15 @@ def setup_train_args():
     parser.add_argument('--seed', type=int, default=None, help='设置种子用于生成随机数，以使得训练的结果是确定的')
     parser.add_argument('--num_workers', type=int, default=1, help="dataloader加载数据时使用的线程数量")
     parser.add_argument('--kl_anneal_function', type=str, default='logistic', help="kl散度模拟退火函数")
-    parser.add_argument('--kl_anneal_percentage', type=float, default=0.1, help="kl散度退火步数百分比")
+    parser.add_argument('--kl_anneal_percentage', type=float, default=0.15, help="kl散度退火步数百分比")
     parser.add_argument('--kl_anneal_k', type=float, default=0.00025, help="kl散度退火系数")
     parser.add_argument('--save_step_percentage', type=float, default=0.05, help="多少步存一次")
     parser.add_argument('--word_dropout', type=float, default=0, help="decoder输入mask的概率")
-    parser.add_argument('--z_use_avg', action='store_true', help='z使用均值计算')
     parser.add_argument('--without_bow', action='store_true', help='不使用bow')
-    # parser.add_argument('--max_len', type=int, default=60, help='每个utterance的最大长度,超过指定长度则进行截断')
-    # parser.add_argument('--max_history_len', type=int, default=4, help="dialogue history的最大长度")
+    parser.add_argument('--repr_form', type=str, default="mean", help="z的表示方式")
+    parser.add_argument('--z_utilize', type=str, default="embedding", help="z的使用方式")
+    parser.add_argument('--bow_weight', type=float, default=5.0, help="bow loss 权值")
+
     return parser.parse_args()
 
 
@@ -105,7 +105,9 @@ def create_model(args, vocab_size):
     :param vocab_size:字典大小
     :return:
     """
-    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, decoder_config=args.decoder_config, word_dropout=args.word_dropout, with_bow=(not args.without_bow))
+    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, decoder_config=args.decoder_config,
+                           word_dropout=args.word_dropout, with_bow=(not args.without_bow),
+                           z_utilize=args.z_utilize, repr_form=args.repr_form)
     return model
 
 
@@ -159,6 +161,8 @@ def calculate_bow(bow_probs, input_ids, device):
     if bow_probs is not None:
         # skip the [cls]
         label = input_ids[:, 1:].contiguous().to(device)
+        label[label == sep_id] = pad_id
+
         bow_probs = bow_probs.unsqueeze(1)
         bow_probs = bow_probs.expand(bow_probs.shape[0], label.shape[1], bow_probs.shape[2]).contiguous()
 
@@ -195,14 +199,14 @@ def collate_fn(batch):
     return torch.tensor(input_ids, dtype=torch.long)
 
 
-def train(model, device, train_list, multi_gpu, args):
+def train(model, device, train_list, args):
     train_dataset = MyDataset(train_list)
     # 因为只train一个epoch，所以不shuffle
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                                   collate_fn=collate_fn)
 
     # 计算所有epoch进行参数优化的总步数total_steps
-    total_steps = int(train_dataset.__len__() * args.epochs / args.batch_size / args.gradient_accumulation)
+    total_steps = int(train_dataset.__len__() * args.epochs / args.batch_size)
     logger.info('total training steps = {}'.format(total_steps))
 
     save_step = max(int(args.save_step_percentage * total_steps), 1)
@@ -250,42 +254,33 @@ def train(model, device, train_list, multi_gpu, args):
             # anneal_function, step, k, x0
             ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
 
-            kl_weight = kl_anneal_function(anneal_function=args.kl_anneal_function, step=overall_step,
-                                                       k=args.kl_anneal_k, x0=kl_anneal_x0)
+            kl_weight = min(0.5, kl_anneal_function(anneal_function=args.kl_anneal_function, step=overall_step,
+                                                       k=args.kl_anneal_k, x0=kl_anneal_x0))
             kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
 
-            bow_weight = 5.0
             bow_loss = calculate_bow(bow_probs, input_ids, device)
 
-            loss = ce + kl_weight * kld + bow_weight * bow_loss
+            loss = ce + kl_weight * kld + args.bow_weight * bow_loss
 
-            if multi_gpu:
-                loss = loss.mean()
-                accuracy = accuracy.mean()
-            if args.gradient_accumulation > 1:
-                loss = loss / args.gradient_accumulation
-                accuracy = accuracy / args.gradient_accumulation
             loss.backward()
             # 梯度裁剪解决的是梯度消失或爆炸的问题，即设定阈值
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            # 进行一定step的梯度累计之后，更新参数
-            if (batch_idx + 1) % args.gradient_accumulation == 0:
-                running_loss += loss.item()
-                # 更新参数
-                optimizer.step()
-                # 清空梯度信息
-                optimizer.zero_grad()
-                # 进行warm up
-                scheduler.step()
-                overall_step += 1
-                # 更新日志与tnesorboardX信息
-                if (overall_step + 1) % args.log_step == 0 or (overall_step + 1 == total_steps):
-                    logger.info(
-                        "step {}, ce {:.6}, kld {:.6}, kl_weight {:.6}, bow {:.6}, bow_weight {:.6}, loss {:.6}, accuracy {:.6}".format(overall_step, ce, kld, kl_weight, bow_loss, bow_weight, loss, accuracy))
-                    tb_writer.add_scalar('ce', ce.item(), overall_step)
-                    tb_writer.add_scalar('kld', kld.item(), overall_step)
-                    tb_writer.add_scalar('loss', loss.item(), overall_step)
-            if (overall_step + 1) % save_step == 0 or (overall_step == total_steps):
+            running_loss += loss.item()
+            # 更新参数
+            optimizer.step()
+            # 清空梯度信息
+            optimizer.zero_grad()
+            # 进行warm up
+            scheduler.step()
+            overall_step += 1
+            # 更新日志与tnesorboardX信息
+            if overall_step == 0 or (overall_step + 1) % args.log_step == 0 or (overall_step + 1 == total_steps):
+                logger.info(
+                    "step {}, ce {:.6}, kld {:.6}, kl_weight {:.6}, bow {:.6}, bow_weight {:.6}, loss {:.6}, accuracy {:.6}".format(overall_step, ce, kld, kl_weight, bow_loss, args.bow_weight, loss, accuracy))
+                tb_writer.add_scalar('ce', ce.item(), overall_step)
+                tb_writer.add_scalar('kld', kld.item(), overall_step)
+                tb_writer.add_scalar('loss', loss.item(), overall_step)
+            if (overall_step + 1) % save_step == 0 or (overall_step + 1 == total_steps):
                 logger.info('saving for step {}'.format(overall_step))
                 if not os.path.exists(args.model_output_path):
                     os.mkdir(args.model_output_path)
@@ -325,16 +320,11 @@ def train(model, device, train_list, multi_gpu, args):
     logger.info('training finished')
 
 
-def evaluate(model, device, test_list, multi_gpu, args):
+def evaluate(model, device, test_list, args):
     model_path = join(args.model_output_path, "saved.pt")
     if os.path.exists(model_path):
         checkpoint = torch.load(model_path)
         model.load_state_dict(checkpoint['model'])
-        # optimizer.load_state_dict(checkpoint['optimizer'])
-        # scheduler.load_state_dict(checkpoint['scheduler'])
-        # finished_epoch = checkpoint['finished_epoch'] + 1
-        # running_loss = checkpoint['running_loss']
-        # overall_step = checkpoint['overall_step']
     logger.info("start evaluating model")
     model.eval()
     logger.info('starting evaluating')
@@ -343,21 +333,16 @@ def evaluate(model, device, test_list, multi_gpu, args):
                                  collate_fn=collate_fn)
     with torch.no_grad():
         for batch_idx, input_ids in enumerate(test_dataloader):
-            input_ids.to(device)
             outputs, mu, logvar, bow_probs = model.forward(input=input_ids)
+            # anneal_function, step, k, x0
             ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
             kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
-            bow_loss = calculate_bow(bow_probs, input_ids,device)
 
-            loss = ce + kld + bow_loss
+            bow_loss = calculate_bow(bow_probs, input_ids, device)
 
-            if multi_gpu:
-                loss = loss.mean()
-                accuracy = accuracy.mean()
-            if args.gradient_accumulation > 1:
-                loss = loss / args.gradient_accumulation
-                accuracy = accuracy / args.gradient_accumulation
-            logger.info("evaluate batch {}, ce {}, kld {}, bow {}, loss {}, accuracy {}".format(batch_idx, ce, kld, bow_loss, loss, accuracy))
+            loss = ce + kld + args.bow_weight * bow_loss
+
+            logger.info("evaluate batch {}, ce {:.6}, kld {:.6}, bow {:.6}, loss {:.6}, accuracy {:.6}".format(batch_idx, ce, kld, bow_loss, loss, accuracy))
         logger.info("finishing evaluating")
 
 
@@ -387,16 +372,13 @@ def main():
     global pad_id
     pad_id = 0
 
+    global sep_id
+    sep_id = 102
+
     # 加载GPT2模型
     model = create_model(args, vocab_size)
     model.to(device)
 
-    # 是否使用多块GPU进行并行运算
-    multi_gpu = False
-    # if args.cuda and torch.cuda.device_count() > 1:
-    #     logger.info("Let's use GPUs to train")
-    #     model = DataParallel(model, device_ids=[int(i) for i in args.device.split(',')])
-    #     multi_gpu = True
     # 记录模型参数数量
     num_parameters = 0
     parameters = model.parameters()
@@ -411,9 +393,9 @@ def main():
     data_list = data.split("\n")
     train_list, test_list = train_test_split(data_list, test_size=0.05, random_state=1)
     # 开始训练
-    train(model, device, train_list, multi_gpu, args)
+    train(model, device, train_list, args)
     # 测试模型
-    evaluate(model, device, test_list, multi_gpu, args)
+    evaluate(model, device, test_list, args)
 
 
 if __name__ == '__main__':
