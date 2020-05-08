@@ -8,6 +8,8 @@ import logging
 from model import TransformerVAE
 from transformers import BertTokenizer
 from os.path import join, exists
+from torch.nn import CrossEntropyLoss
+
 
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -86,7 +88,8 @@ def create_model(args, vocab_size):
     :param vocab_size:字典大小
     :return:
     """
-    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, pretrained_decoder=args.pretrained_decoder)
+    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, decoder_config=args.decoder_config,
+                           z_utilize=args.z_utilize, repr_form=args.repr_form)
     return model
 
 pad_idx = 0
@@ -106,7 +109,46 @@ def get_text(tokenizer, ids):
     text = tokenizer.convert_ids_to_tokens(ids)
     return "".join(text)
 
+def calculate_loss_and_accuracy(outputs, labels, device):
+    """
+    计算非pad_id的平均loss和准确率
+    :param outputs:
+    :param labels:
+    :param device:
+    :return:
+    """
+    logits = outputs[0]  # 每个token用来预测下一个token的prediction_score,维度:[batch_size,token_len,voca_size]
+    # 用前n-1个token，预测出第n个token
+    # 用第i个token的prediction_score用来预测第i+1个token。
+    # 假定有input有n个token，则shift_logits表示model中第[0,n-2]个token的prediction_score，shift_labels表示第[1，n-1]的label
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous().to(device)
+
+    loss_fct = CrossEntropyLoss(ignore_index=pad_id, reduction='sum')  # 忽略pad_id的loss,并对所有的非pad_id的loss进行求和
+    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1))
+
+    _, preds = shift_logits.max(dim=-1)  # preds表示对应的prediction_score预测出的token在voca中的id。维度为[batch_size,token_len]
+
+    # 对非pad_id的token的loss进行求平均，且计算出预测的准确率
+    not_ignore = shift_labels.ne(pad_id)  # 进行非运算，返回一个tensor，若targets_view的第i个位置为pad_id，则置为0，否则为1
+    num_targets = not_ignore.long().sum().item()  # 计算target中的非pad_id的数量
+
+    correct = (shift_labels == preds) & not_ignore  # 计算model预测正确的token的个数，排除pad的token
+    correct = correct.float().sum()
+
+    accuracy = correct / num_targets
+    loss = loss / num_targets
+    return loss, accuracy
+
+
 def main():
+    global pad_id
+    pad_id = 0
+
+    global sep_id
+    sep_id = 102
+
     args = set_interact_args()
     logger = create_logger(args)
     # 当用户使用GPU,并且GPU可用时
@@ -130,7 +172,10 @@ def main():
 
     model_path = join(args.model_output_path, "saved.pt")
     if os.path.exists(model_path):
-        checkpoint = torch.load(model_path)
+        if device == 'cpu':
+            checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+        else:
+            checkpoint = torch.load(model_path)
         model.load_state_dict(checkpoint['model'])
     else:
         logger.info("no pretrained model!")
@@ -146,11 +191,19 @@ def main():
             if not flag:
                 print(input_tensor.shape)
                 flag = True
-            gen = model.inference(input_tensor, device, args.max_len, args.topk, args.topp)
+            gen, logits, mu, logvar = model.inference(input_tensor, device, args.max_len, args.topk, args.topp)
+
+            ce, accuracy = calculate_loss_and_accuracy(logits, labels=input_tensor, device=device)
+
+            kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
+
+            loss = ce + 0.5 * kld
+
             src = get_text(tokenizer, test)
             gen = get_text(tokenizer, gen)
             f.write("src:{}\n".format(src))
             f.write("gen:{}\n".format(gen))
+            f.write("ce {:.6}, kld {:.6}, loss {:.6}, accuracy {:.6}\n".format(ce, kld, loss, accuracy))
 
 if __name__ == '__main__':
     main()

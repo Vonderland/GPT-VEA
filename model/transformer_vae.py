@@ -1,7 +1,5 @@
 from torch import nn
-from typing import Tuple
 import torch
-import transformers
 
 from model.nn.modules import (EmbeddingWithPosition, TransformerEncoderLayer)
 
@@ -149,6 +147,7 @@ class TransformerVAE(nn.Module):
 
     def inference(self, input: torch.Tensor, device, max_len, topk, topp):
         batch_size = input.shape[0]
+        seq_len = input.shape[1]
         input_embedded = self.embedding(input)
 
         encoder_state = input_embedded
@@ -185,10 +184,17 @@ class TransformerVAE(nn.Module):
         input_ids = [cls_idx]
         curr_input_tensor = torch.tensor(input_ids).long().to(device)
 
+        logits = None
+
         # 最多生成max_len个token
         for _ in range(max_len):
             outputs = self.decoder(input_ids=curr_input_tensor, latent_z=z)
             next_token_logits = outputs[0][-1, :]
+            if _ < seq_len:
+                if logits is None:
+                    logits = next_token_logits.clone().detach()
+                else:
+                    logits = torch.cat((logits, next_token_logits.clone().detach()), -1)
             # 对于[UNK]的概率设为无穷小，也就是说模型的预测结果不可能是[UNK]这个token
             next_token_logits[unk_idx] = -float('Inf')
             filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=topk, top_p=topp)
@@ -200,8 +206,9 @@ class TransformerVAE(nn.Module):
             curr_input_tensor = torch.cat((curr_input_tensor, next_token), dim=0)
             # his_text = tokenizer.convert_ids_to_tokens(curr_input_tensor.tolist())
             # print("his_text:{}".format(his_text))
-
-        return generated
+        logits = torch.tensor(logits).reshape((1, -1, self.vocab_size)).to(device)
+        print(logits.shape, input.shape)
+        return generated, logits, mu, logvar
 
     def forward(self, input: torch.Tensor):
         batch_size = input.shape[0]
@@ -212,8 +219,6 @@ class TransformerVAE(nn.Module):
         for encoder_layer in self.encoder_layers:
             encoder_state = encoder_layer(encoder_state)
 
-        # Use last hidden state as sequence context vector:
-        # 用最后一个状态可能太弱了，试下换成均值
         # Use last hidden state as sequence context vector:
         # 用最后一个状态可能太弱了，试下换成均值
         # 按照原来的用均值？用最后一个？

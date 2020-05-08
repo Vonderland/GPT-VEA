@@ -42,7 +42,6 @@ def setup_train_args():
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False)
     parser.add_argument('--model_output_path', default='saved_model/', type=str, required=False,
                         help='对话模型输出路径')
-    parser.add_argument('--pretrained_decoder', default='pretrained/', type=str, required=False, help='预训练的GPT2模型的路径')
     parser.add_argument('--writer_dir', default='tensorboard_summary/', type=str, required=False, help='Tensorboard路径')
     parser.add_argument('--seed', type=int, default=None, help='设置种子用于生成随机数，以使得训练的结果是确定的')
     parser.add_argument('--num_workers', type=int, default=1, help="dataloader加载数据时使用的线程数量")
@@ -258,6 +257,7 @@ def train(model, device, train_list, args):
                                                        k=args.kl_anneal_k, x0=kl_anneal_x0))
             kld = (-0.5 * torch.sum(logvar - torch.pow(mu, 2) - torch.exp(logvar) + 1, 1)).mean().squeeze()
 
+
             bow_loss = calculate_bow(bow_probs, input_ids, device)
 
             loss = ce + kl_weight * kld + args.bow_weight * bow_loss
@@ -333,6 +333,7 @@ def evaluate(model, device, test_list, args):
                                  collate_fn=collate_fn)
     with torch.no_grad():
         for batch_idx, input_ids in enumerate(test_dataloader):
+            input_ids = input_ids.to(device)
             outputs, mu, logvar, bow_probs = model.forward(input=input_ids)
             # anneal_function, step, k, x0
             ce, accuracy = calculate_loss_and_accuracy(outputs, labels=input_ids, device=device)
@@ -340,7 +341,7 @@ def evaluate(model, device, test_list, args):
 
             bow_loss = calculate_bow(bow_probs, input_ids, device)
 
-            loss = ce + kld + args.bow_weight * bow_loss
+            loss = ce + 0.5 * kld + args.bow_weight * bow_loss
 
             logger.info("evaluate batch {}, ce {:.6}, kld {:.6}, bow {:.6}, loss {:.6}, accuracy {:.6}".format(batch_idx, ce, kld, bow_loss, loss, accuracy))
         logger.info("finishing evaluating")
