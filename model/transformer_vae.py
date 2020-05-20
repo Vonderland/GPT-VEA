@@ -28,13 +28,11 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
     top_k = min(top_k, logits.size(-1))  # Safety check
     if top_k > 0:
         # Remove all tokens with a probability less than the last token of the top-k
-        # torch.topk()返回最后一维最大的top_k个元素，返回值为二维(values,indices)
-        # ...表示其他维度由计算机自行推断
         indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-        logits[indices_to_remove] = filter_value  # 对于topk之外的其他元素的logits值设为负无穷
+        logits[indices_to_remove] = filter_value
 
     if top_p > 0.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)  # 对logits进行递减排序
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
         # Remove tokens with cumulative probability above the threshold
@@ -102,7 +100,6 @@ class TransformerVAE(nn.Module):
         ])
 
         # Decoder
-        # 这里具体换掉
         if self.z_utilize == "cls":
             from model.nn.cls_gpt2 import GPT2LMHeadModel
             from model.nn.cls_gpt2 import configuration_utils
@@ -110,13 +107,13 @@ class TransformerVAE(nn.Module):
             from model.nn.gpt2 import GPT2LMHeadModel
             from model.nn.gpt2 import configuration_utils
 
-        if pretrained_decoder:  # 如果指定了预训练的GPT2模型
+        if pretrained_decoder:  # use pretrained model
             self.decoder = GPT2LMHeadModel.from_pretrained(pretrained_decoder)
-        else:  # 若没有指定预训练模型，则初始化模型
+        else:  # 若random initialization
             print("use config, random initialization")
             model_config = configuration_utils.PretrainedConfig.from_json_file(decoder_config)
             self.decoder = GPT2LMHeadModel(config=model_config)
-        # 根据tokenizer的vocabulary调整GPT2模型的vocal的大小
+        # change vocab size
         self.decoder.resize_token_embeddings(vocab_size)
         print('model config:\n{}'.format(self.decoder.config.to_json_string()))
 
@@ -155,10 +152,7 @@ class TransformerVAE(nn.Module):
         for encoder_layer in self.encoder_layers:
             encoder_state = encoder_layer(encoder_state)
 
-        # Use last hidden state as sequence context vector:
-        # 用最后一个状态可能太弱了，试下换成均值
-        # 按照原来的用均值？用最后一个？
-        # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
+        # try different representation vector:
         if self.repr_form == "last":
             seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
         elif self.repr_form == "mean":
@@ -186,7 +180,6 @@ class TransformerVAE(nn.Module):
 
         logits = None
 
-        # 最多生成max_len个token
         for _ in range(max_len):
             outputs = self.decoder(input_ids=curr_input_tensor, latent_z=z)
             next_token_logits = outputs[0][-1, :]
@@ -195,12 +188,11 @@ class TransformerVAE(nn.Module):
                     logits = next_token_logits.clone().detach()
                 else:
                     logits = torch.cat((logits, next_token_logits.clone().detach()), -1)
-            # 对于[UNK]的概率设为无穷小，也就是说模型的预测结果不可能是[UNK]这个token
             next_token_logits[unk_idx] = -float('Inf')
             filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=topk, top_p=topp)
-            # torch.multinomial表示从候选集合中无放回地进行抽取num_samples个元素，权重越高，抽到的几率越高，返回元素的下标
+
             next_token = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
-            # if next_token == tokenizer.sep_token_id:  # 遇到[SEP]则表明response生成结束
+            # if next_token == tokenizer.sep_token_id:
             #     break
             generated.append(next_token.item())
             curr_input_tensor = torch.cat((curr_input_tensor, next_token), dim=0)
@@ -218,10 +210,6 @@ class TransformerVAE(nn.Module):
         for encoder_layer in self.encoder_layers:
             encoder_state = encoder_layer(encoder_state)
 
-        # Use last hidden state as sequence context vector:
-        # 用最后一个状态可能太弱了，试下换成均值
-        # 按照原来的用均值？用最后一个？
-        # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
         if self.repr_form == "last":
             seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
         elif self.repr_form == "mean":

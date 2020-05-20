@@ -1,4 +1,3 @@
-import transformers
 import torch
 import os
 import random
@@ -40,9 +39,6 @@ def set_interact_args():
 
 
 def set_random_seed(args):
-    """
-    设置训练的随机种子
-    """
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -53,23 +49,18 @@ def set_random_seed(args):
 
 
 def create_logger(args):
-    """
-    将日志输出到日志文件和控制台
-    """
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
 
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s')
 
-    # 创建一个handler，用于写入日志文件
     file_handler = logging.FileHandler(
         filename=args.log_path)
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
     logger.addHandler(file_handler)
 
-    # 创建一个handler，用于将日志输出到控制台
     console = logging.StreamHandler()
     console.setLevel(logging.DEBUG)
     console.setFormatter(formatter)
@@ -107,31 +98,23 @@ def get_text(tokenizer, ids):
     return "".join(text)
 
 def calculate_loss_and_accuracy(outputs, labels, device):
-    """
-    计算非pad_id的平均loss和准确率
-    :param outputs:
-    :param labels:
-    :param device:
-    :return:
-    """
-    logits = outputs[0]  # 每个token用来预测下一个token的prediction_score,维度:[batch_size,token_len,voca_size]
-    # 用前n-1个token，预测出第n个token
-    # 用第i个token的prediction_score用来预测第i+1个token。
-    # 假定有input有n个token，则shift_logits表示model中第[0,n-2]个token的prediction_score，shift_labels表示第[1，n-1]的label
+
+    # modified the gpt2 source codes
+    logits = outputs[0]
+
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous().to(device)
 
-    loss_fct = CrossEntropyLoss(ignore_index=pad_id, reduction='sum')  # 忽略pad_id的loss,并对所有的非pad_id的loss进行求和
+    loss_fct = CrossEntropyLoss(ignore_index=pad_id, reduction='sum')  # ignore pad
     loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)),
                     shift_labels.view(-1))
 
-    _, preds = shift_logits.max(dim=-1)  # preds表示对应的prediction_score预测出的token在voca中的id。维度为[batch_size,token_len]
+    _, preds = shift_logits.max(dim=-1)
 
-    # 对非pad_id的token的loss进行求平均，且计算出预测的准确率
-    not_ignore = shift_labels.ne(pad_id)  # 进行非运算，返回一个tensor，若targets_view的第i个位置为pad_id，则置为0，否则为1
-    num_targets = not_ignore.long().sum().item()  # 计算target中的非pad_id的数量
+    not_ignore = shift_labels.ne(pad_id)
+    num_targets = not_ignore.long().sum().item()
 
-    correct = (shift_labels == preds) & not_ignore  # 计算model预测正确的token的个数，排除pad的token
+    correct = (shift_labels == preds) & not_ignore
     correct = correct.float().sum()
 
     accuracy = correct / num_targets
@@ -148,16 +131,16 @@ def main():
 
     args = set_interact_args()
     logger = create_logger(args)
-    # 当用户使用GPU,并且GPU可用时
+
     args.cuda = torch.cuda.is_available() and not args.no_cuda
     device = 'cuda' if args.cuda else 'cpu'
     logger.info('using device:{}'.format(device))
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device
-    # 初始化tokenizer
+
     tokenizer = BertTokenizer(vocab_file=args.vocab_path)
-    # tokenizer的字典大小
+
     vocab_size = len(tokenizer)
-    # 加载数据
+
     logger.info("loading data")
     with open(args.train_tokenized_path, "r", encoding="utf8") as f:
         data = f.read()

@@ -88,10 +88,8 @@ class TransformerBOW(nn.Module):
         for encoder_layer in self.encoder_layers:
             encoder_state = encoder_layer(encoder_state)
 
-        # Use last hidden state as sequence context vector:
-        # 用最后一个状态可能太弱了，试下换成均值
-        # 按照原来的用均值？用最后一个？
-        # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
+        # Use different representation vector:
+
         if self.repr_form == "last":
             seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
         elif self.repr_form == "mean":
