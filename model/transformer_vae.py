@@ -207,7 +207,6 @@ class TransformerVAE(nn.Module):
             # his_text = tokenizer.convert_ids_to_tokens(curr_input_tensor.tolist())
             # print("his_text:{}".format(his_text))
         logits = torch.tensor(logits).reshape((1, -1, self.vocab_size)).to(device)
-        print(logits.shape, input.shape)
         return generated, logits, mu, logvar
 
     def forward(self, input: torch.Tensor):

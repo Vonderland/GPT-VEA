@@ -20,25 +20,22 @@ n_ctx = 300
 
 def set_interact_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default='1', type=str, required=False, help='设置使用哪些显卡')
-    parser.add_argument('--no_cuda', action='store_true', help='不使用GPU进行训练')
-    parser.add_argument('--model_config', default='config/model_config_dialogue_small.json', type=str, required=False,
-                        help='选择模型参数')
-    parser.add_argument('--vocab_path', default='vocabulary/vocab_small.txt', type=str, required=False, help='选择词库')
+    parser.add_argument('--device', default='1', type=str, required=False)
+    parser.add_argument('--no_cuda', action='store_true')
+    parser.add_argument('--model_config', default='config/model_config_dialogue_small.json', type=str, required=False)
+    parser.add_argument('--vocab_path', default='vocabulary/vocab_small.txt', type=str, required=False)
     parser.add_argument('--train_tokenized_path', default='data/train_tokenized.txt', type=str,
-                        required=False,
-                        help='将原始训练语料tokenize之后的数据的存放位置')
-    parser.add_argument('--log_path', default='data/inference.log', type=str, required=False, help='训练日志存放位置')
-    parser.add_argument('--output_path', default='data/output.txt', type=str, required=False, help='测试语料生成存放位置')
-    parser.add_argument('--model_output_path', default='saved_model/', type=str, required=False,
-                        help='对话模型输出路径')
-    parser.add_argument('--decoder_config', default='pretrained/config.json', type=str, required=False,
-                        help='选择模型参数')
-    parser.add_argument('--topk', default=8, type=int, required=False, help='最高k选1')
-    parser.add_argument('--topp', default=0, type=float, required=False, help='最高积累概率')
-    parser.add_argument('--repr_form', type=str, default="mean", help="z的表示方式")
-    parser.add_argument('--z_utilize', type=str, default="embedding", help="z的使用方式")
-    parser.add_argument('--max_len', type=int, default=100, help='每个utterance的最大长度,超过指定长度则进行截断')
+                        required=False)
+    parser.add_argument('--log_path', default='data/inference.log', type=str, required=False)
+    parser.add_argument('--output_path', default='data/output.txt', type=str, required=False)
+    parser.add_argument('--model_output_path', default='saved_model/', type=str, required=False)
+    parser.add_argument('--decoder_config', default='pretrained/config.json', type=str, required=False)
+    parser.add_argument('--topk', default=5, type=int, required=False)
+    parser.add_argument('--topp', default=0, type=float, required=False)
+    parser.add_argument('--repr_form', type=str, default="mean")
+    parser.add_argument('--z_utilize', type=str, default="embedding")
+    parser.add_argument('--max_len', type=int, default=100)
+    parser.add_argument('--without_bow', action='store_true')
     return parser.parse_args()
 
 
@@ -88,7 +85,7 @@ def create_model(args, vocab_size):
     :param vocab_size:字典大小
     :return:
     """
-    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, decoder_config=args.decoder_config,
+    model = TransformerVAE(n_ctx=n_ctx, vocab_size=vocab_size, decoder_config=args.decoder_config, with_bow=(not args.without_bow),
                            z_utilize=args.z_utilize, repr_form=args.repr_form)
     return model
 
@@ -182,15 +179,11 @@ def main():
 
     model.eval()
 
-    flag = False
     with open(args.output_path, "w", encoding="utf-8") as f:
         for test in tqdm(test_list):
             test = [int(i) for i in test.split()]
             input_tensor = torch.tensor(test).long().to(device)
             input_tensor = torch.unsqueeze(input_tensor, 0)
-            if not flag:
-                print(input_tensor.shape)
-                flag = True
             gen, logits, mu, logvar = model.inference(input_tensor, device, args.max_len, args.topk, args.topp)
 
             ce, accuracy = calculate_loss_and_accuracy(logits, labels=input_tensor, device=device)

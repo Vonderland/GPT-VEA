@@ -22,11 +22,12 @@ class TransformerBOW(nn.Module):
                  num_layers=10,
                  emb_size=768,
                  latent_size=768,
-                 dim_m=768,
+                 dim_m=512,
                  dim_i=2048,
-                 n_heads=12,
+                 n_heads=8,
                  initial_token_idx=101,
-                 dropout=0.1):
+                 dropout=0.1,
+                 repr_form="last"):
 
         super(TransformerBOW, self).__init__()
 
@@ -36,6 +37,7 @@ class TransformerBOW(nn.Module):
             assert isinstance(embedding_weights, torch.Tensor), "embedding must be a torch.Tensor"
             vocab_size, emb_size = embedding_weights.shape
         self.vocab_size = vocab_size
+        self.repr_form = repr_form
 
         message = 'Model `dim_m` must be divisible by `n_heads` without a remainder.'
         assert dim_m % n_heads == 0, message
@@ -58,8 +60,17 @@ class TransformerBOW(nn.Module):
         ])
 
         # VAE
-        self.to_mu = nn.Linear(dim_m, latent_size)
-        self.to_logvar = nn.Linear(dim_m, latent_size)
+        # first-last
+        if self.repr_form == "fl":
+            self.to_mu = nn.Linear(2 * dim_m, latent_size)
+            self.to_logvar = nn.Linear(2 * dim_m, latent_size)
+        # first-mean-last
+        elif self.repr_form == "fml":
+            self.to_mu = nn.Linear(3 * dim_m, latent_size)
+            self.to_logvar = nn.Linear(3 * dim_m, latent_size)
+        else:
+            self.to_mu = nn.Linear(dim_m, latent_size)
+            self.to_logvar = nn.Linear(dim_m, latent_size)
 
         self.bow_predictor = nn.Linear(latent_size, vocab_size)
 
@@ -81,8 +92,16 @@ class TransformerBOW(nn.Module):
         # 用最后一个状态可能太弱了，试下换成均值
         # 按照原来的用均值？用最后一个？
         # 后续用头来做z？改维度，用头concate尾？头-尾-均值 concate？
-        seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
-
+        if self.repr_form == "last":
+            seq_repr = encoder_state[:, -1, :].view(batch_size, -1)
+        elif self.repr_form == "mean":
+            seq_repr = encoder_state.mean(dim=1).view(batch_size, -1)
+        elif self.repr_form == "first":
+            seq_repr = encoder_state[:, 0, :].view(batch_size, -1)
+        elif self.repr_form == "fl":
+            seq_repr = torch.cat((encoder_state[:, 0, :], encoder_state[:, -1, :]), -1).view(batch_size, -1)
+        elif self.repr_form == "fml":
+            seq_repr = torch.cat((encoder_state[:, 0, :], encoder_state.mean(dim=1), encoder_state[:, -1, :]), -1).view(batch_size, -1)
 
         # Reparameterize
         mu = self.to_mu(seq_repr)
