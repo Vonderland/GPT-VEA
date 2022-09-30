@@ -11,7 +11,7 @@ funcsigs==1.0.2
 grpcio==1.23.0
 idna==2.9
 jmespath==0.9.5
-joblib==0.14.1
+joblib==1.2.0
 Markdown==3.2.1
 nltk==3.4.4
 numpy==1.16.6
